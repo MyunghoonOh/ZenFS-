@@ -1,7 +1,7 @@
 // Copyright (c) 2011 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
-
+#include <unistd.h>
 #include <sys/types.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,6 +16,12 @@
 #include "util/mutexlock.h"
 #include "util/random.h"
 #include "util/testutil.h"
+
+//#include "leveldb/options.h"
+
+#include <iostream>
+
+//#include <libzbc/zbc.h>
 
 // Comma-separated list of operations to run in the specified order
 //   Actual benchmarks:
@@ -112,6 +118,9 @@ static bool FLAGS_reuse_logs = false;
 
 // Use the db with the following name.
 static const char* FLAGS_db = nullptr;
+
+//Hoon
+//LevelDB::CompressionType FLAGS_compression = 0x00;
 
 namespace leveldb {
 
@@ -432,9 +441,11 @@ class Benchmark {
 
   void Run() {
     PrintHeader();
+
     Open();
 
     const char* benchmarks = FLAGS_benchmarks;
+
     while (benchmarks != nullptr) {
       const char* sep = strchr(benchmarks, ',');
       Slice name;
@@ -456,7 +467,7 @@ class Benchmark {
       void (Benchmark::*method)(ThreadState*) = nullptr;
       bool fresh_db = false;
       int num_threads = FLAGS_threads;
-
+      
       if (name == Slice("open")) {
         method = &Benchmark::OpenBench;
         num_ /= 10000;
@@ -534,6 +545,7 @@ class Benchmark {
                   name.ToString().c_str());
           method = nullptr;
         } else {
+	  //std::cout << "db_bench db no reuse" << std::endl;
           delete db_;
           db_ = nullptr;
           DestroyDB(FLAGS_db, Options());
@@ -542,6 +554,7 @@ class Benchmark {
       }
 
       if (method != nullptr) {
+	//std::cout << "Start" << std::endl;
         RunBenchmark(num_threads, name, method);
       }
     }
@@ -703,6 +716,7 @@ class Benchmark {
   }
 
   void Open() {
+    db_ = nullptr;
     assert(db_ == nullptr);
     Options options;
     options.env = g_env;
@@ -711,14 +725,19 @@ class Benchmark {
     options.write_buffer_size = FLAGS_write_buffer_size;
     options.max_file_size = FLAGS_max_file_size;
     options.block_size = FLAGS_block_size;
+    //options.compression = FLAGS_compression;
+    //options.compression = kNoCompression;
     options.max_open_files = FLAGS_open_files;
     options.filter_policy = filter_policy_;
     options.reuse_logs = FLAGS_reuse_logs;
+
+    //std::cout << "A0" << std::endl;
     Status s = DB::Open(options, FLAGS_db, &db_);
     if (!s.ok()) {
       fprintf(stderr, "open error: %s\n", s.ToString().c_str());
       exit(1);
     }
+    //std::cout << "A1" << std::endl;
   }
 
   void OpenBench(ThreadState* thread) {
@@ -743,26 +762,35 @@ class Benchmark {
       snprintf(msg, sizeof(msg), "(%d ops)", num_);
       thread->stats.AddMessage(msg);
     }
+    unsigned int new_bytes = 0;
 
     RandomGenerator gen;
     WriteBatch batch;
     Status s;
     int64_t bytes = 0;
     for (int i = 0; i < num_; i += entries_per_batch_) {
+	//std::cout << "db_bench do write " << i << std::endl;
       batch.Clear();
       for (int j = 0; j < entries_per_batch_; j++) {
         const int k = seq ? i+j : (thread->rand.Next() % FLAGS_num);
         char key[100];
         snprintf(key, sizeof(key), "%016d", k);
         batch.Put(key, gen.Generate(value_size_));
+	new_bytes += value_size_ + strlen(key);
         bytes += value_size_ + strlen(key);
         thread->stats.FinishedSingleOp();
+      }
+      if(new_bytes > 1024*1024*200){
+	      std::cout << "SLEEP" << std::endl;
+	      sleep(15);
+	      new_bytes = 0;
       }
       s = db_->Write(write_options_, &batch);
       if (!s.ok()) {
         fprintf(stderr, "put error: %s\n", s.ToString().c_str());
         exit(1);
       }
+	//std::cout << "db_bench done write " << i << std::endl;
     }
     thread->stats.AddBytes(bytes);
   }
@@ -933,7 +961,7 @@ class Benchmark {
     char fname[100];
     snprintf(fname, sizeof(fname), "%s/heap-%04d", FLAGS_db, ++heap_counter_);
     WritableFile* file;
-    Status s = g_env->NewWritableFile(fname, &file);
+    Status s = g_env->NewWritableFile(fname, 0, 0, &file);//??
     if (!s.ok()) {
       fprintf(stderr, "%s\n", s.ToString().c_str());
       return;
@@ -1001,8 +1029,10 @@ int main(int argc, char** argv) {
     }
   }
 
-  leveldb::g_env = leveldb::Env::Default();
-
+  //Hoon
+  //leveldb::g_env = leveldb::Env::Default();
+  //leveldb::g_env = leveldb::Env::ZoneDefault();
+  leveldb::g_env = leveldb::Env::ZoadDefault();
   // Choose a location for the test database if none given with --db=<path>
   if (FLAGS_db == nullptr) {
       leveldb::g_env->GetTestDirectory(&default_db_path);

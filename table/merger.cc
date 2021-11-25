@@ -8,6 +8,8 @@
 #include "leveldb/iterator.h"
 #include "table/iterator_wrapper.h"
 
+#include <iostream>
+
 namespace leveldb {
 
 namespace {
@@ -58,7 +60,7 @@ class MergingIterator : public Iterator {
 
   virtual void Next() {
     assert(Valid());
-
+//std::cout << "Merger Next 0" << std::endl;
     // Ensure that all children are positioned after key().
     // If we are moving in the forward direction, it is already
     // true for all of the non-current_ children since current_ is
@@ -80,6 +82,7 @@ class MergingIterator : public Iterator {
 
     current_->Next();
     FindSmallest();
+//std::cout << "Merger Next 1" << std::endl;
   }
 
   virtual void Prev() {

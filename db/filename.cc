@@ -8,6 +8,7 @@
 #include "db/dbformat.h"
 #include "leveldb/env.h"
 #include "util/logging.h"
+#include <iostream>
 
 namespace leveldb {
 

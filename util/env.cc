@@ -4,12 +4,14 @@
 
 #include "leveldb/env.h"
 
+#include "util/zoad/controller.h"
+
 namespace leveldb {
 
 Env::~Env() {
 }
 
-Status Env::NewAppendableFile(const std::string& fname, WritableFile** result) {
+Status Env::NewAppendableFile(const std::string& fname, unsigned int level, unsigned int flag, WritableFile** result) {
   return Status::NotSupported("NewAppendableFile", fname);
 }
 
@@ -41,7 +43,7 @@ static Status DoWriteStringToFile(Env* env, const Slice& data,
                                   const std::string& fname,
                                   bool should_sync) {
   WritableFile* file;
-  Status s = env->NewWritableFile(fname, &file);
+  Status s = env->NewWritableFile(fname, 0, 0, &file);//Test
   if (!s.ok()) {
     return s;
   }
@@ -77,7 +79,8 @@ Status ReadFileToString(Env* env, const std::string& fname, std::string* data) {
     return s;
   }
   static const int kBufferSize = 8192;
-  char* space = new char[kBufferSize];
+  //char* space = new char[kBufferSize];
+  char* space = new char[IO_SIZE];
   while (true) {
     Slice fragment;
     s = file->Read(kBufferSize, &fragment, space);

@@ -44,6 +44,8 @@ class LEVELDB_EXPORT Env {
   //
   // The result of Default() belongs to leveldb and must never be deleted.
   static Env* Default();
+  static Env* ZoadDefault();
+  //static Env* ZoneDefault();
 
   // Create an object that sequentially reads the file with the specified name.
   // On success, stores a pointer to the new file in *result and returns OK.
@@ -73,8 +75,7 @@ class LEVELDB_EXPORT Env {
   // returns non-OK.
   //
   // The returned file will only be accessed by one thread at a time.
-  virtual Status NewWritableFile(const std::string& fname,
-                                 WritableFile** result) = 0;
+  virtual Status NewWritableFile(const std::string& fname, unsigned level, unsigned flag, WritableFile** result) = 0;
 
   // Create an object that either appends to an existing file, or
   // writes to a new file (if the file does not exist to begin with).
@@ -88,8 +89,7 @@ class LEVELDB_EXPORT Env {
   // not allow appending to an existing file.  Users of Env (including
   // the leveldb implementation) must be prepared to deal with
   // an Env that does not support appending.
-  virtual Status NewAppendableFile(const std::string& fname,
-                                   WritableFile** result);
+  virtual Status NewAppendableFile(const std::string& fname, unsigned level, unsigned flag, WritableFile** result);
 
   // Returns true iff the named file exists.
   virtual bool FileExists(const std::string& fname) = 0;
@@ -299,11 +299,11 @@ class LEVELDB_EXPORT EnvWrapper : public Env {
                              RandomAccessFile** r) override {
     return target_->NewRandomAccessFile(f, r);
   }
-  Status NewWritableFile(const std::string& f, WritableFile** r) override {
-    return target_->NewWritableFile(f, r);
+  Status NewWritableFile(const std::string& f, unsigned level, unsigned flag, WritableFile** r) override {
+    return target_->NewWritableFile(f, level, flag, r);
   }
-  Status NewAppendableFile(const std::string& f, WritableFile** r) override {
-    return target_->NewAppendableFile(f, r);
+  Status NewAppendableFile(const std::string& f, unsigned level, unsigned flag, WritableFile** r) override {
+    return target_->NewAppendableFile(f, level, flag, r);
   }
   bool FileExists(const std::string& f) override {
     return target_->FileExists(f);

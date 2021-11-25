@@ -15,6 +15,9 @@
 #include "table/two_level_iterator.h"
 #include "util/coding.h"
 
+#include "util/zoad/controller.h"
+#include <iostream>
+
 namespace leveldb {
 
 struct Table::Rep {
@@ -44,7 +47,17 @@ Status Table::Open(const Options& options,
     return Status::Corruption("file is too short to be an sstable");
   }
 
-  char footer_space[Footer::kEncodedLength];
+  unsigned int zsize = 0;
+  if(Footer::kEncodedLength/IO_SIZE > 0){
+       zsize = Footer::kEncodedLength/IO_SIZE;
+  }
+  if(Footer::kEncodedLength % IO_SIZE){
+    zsize += IO_SIZE;
+  }
+  char footer_space[zsize];
+
+  //char footer_space[Footer::kEncodedLength];
+
   Slice footer_input;
   Status s = file->Read(size - Footer::kEncodedLength, Footer::kEncodedLength,
                         &footer_input, footer_space);
@@ -108,6 +121,7 @@ void Table::ReadMeta(const Footer& footer) {
   if (iter->Valid() && iter->key() == Slice(key)) {
     ReadFilter(iter->value());
   }
+  
   delete iter;
   delete meta;
 }

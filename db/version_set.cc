@@ -18,6 +18,8 @@
 #include "util/coding.h"
 #include "util/logging.h"
 
+#include <iostream>
+
 namespace leveldb {
 
 static size_t TargetFileSize(const Options* options) {
@@ -851,7 +853,7 @@ Status VersionSet::LogAndApply(VersionEdit* edit, port::Mutex* mu) {
     assert(descriptor_file_ == nullptr);
     new_manifest_file = DescriptorFileName(dbname_, manifest_file_number_);
     edit->SetNextFile(next_file_number_);
-    s = env_->NewWritableFile(new_manifest_file, &descriptor_file_);
+    s = env_->NewWritableFile(new_manifest_file, 0, 0, &descriptor_file_);//manifest
     if (s.ok()) {
       descriptor_log_ = new log::Writer(descriptor_file_);
       s = WriteSnapshot(descriptor_log_);
@@ -913,10 +915,13 @@ Status VersionSet::Recover(bool *save_manifest) {
 
   // Read "CURRENT" file, which contains a pointer to the current manifest file
   std::string current;
+  //std::cout << "V0" << std::endl;
   Status s = ReadFileToString(env_, CurrentFileName(dbname_), &current);
+  //std::cout << "V0.5" << std::endl;
   if (!s.ok()) {
     return s;
   }
+  //std::cout << "V1" << std::endl;
   if (current.empty() || current[current.size()-1] != '\n') {
     return Status::Corruption("CURRENT file does not end with newline");
   }
@@ -925,6 +930,7 @@ Status VersionSet::Recover(bool *save_manifest) {
   std::string dscname = dbname_ + "/" + current;
   SequentialFile* file;
   s = env_->NewSequentialFile(dscname, &file);
+  //std::cout << "V2" << std::endl;
   if (!s.ok()) {
     if (s.IsNotFound()) {
       return Status::Corruption(
@@ -932,7 +938,7 @@ Status VersionSet::Recover(bool *save_manifest) {
     }
     return s;
   }
-
+  //std::cout << "V3" << std::endl;
   bool have_log_number = false;
   bool have_prev_log_number = false;
   bool have_next_file = false;
@@ -942,7 +948,7 @@ Status VersionSet::Recover(bool *save_manifest) {
   uint64_t log_number = 0;
   uint64_t prev_log_number = 0;
   Builder builder(this, current_);
-
+  //std::cout << "V4" << std::endl;
   {
     LogReporter reporter;
     reporter.status = &s;
@@ -986,6 +992,7 @@ Status VersionSet::Recover(bool *save_manifest) {
       }
     }
   }
+  //std::cout << "V5" << std::endl;
   delete file;
   file = nullptr;
 
@@ -1005,7 +1012,7 @@ Status VersionSet::Recover(bool *save_manifest) {
     MarkFileNumberUsed(prev_log_number);
     MarkFileNumberUsed(log_number);
   }
-
+  //std::cout << "V6" << std::endl;
   if (s.ok()) {
     Version* v = new Version(this);
     builder.SaveTo(v);
@@ -1025,6 +1032,7 @@ Status VersionSet::Recover(bool *save_manifest) {
       *save_manifest = true;
     }
   }
+  //std::cout << "V7" << std::endl;
 
   return s;
 }
@@ -1047,7 +1055,7 @@ bool VersionSet::ReuseManifest(const std::string& dscname,
 
   assert(descriptor_file_ == nullptr);
   assert(descriptor_log_ == nullptr);
-  Status r = env_->NewAppendableFile(dscname, &descriptor_file_);
+  Status r = env_->NewAppendableFile(dscname, 0, 0, &descriptor_file_);//manifest
   if (!r.ok()) {
     Log(options_->info_log, "Reuse MANIFEST: %s\n", r.ToString().c_str());
     assert(descriptor_file_ == nullptr);

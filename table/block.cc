@@ -13,6 +13,8 @@
 #include "util/coding.h"
 #include "util/logging.h"
 
+#include <iostream>
+
 namespace leveldb {
 
 inline uint32_t Block::NumRestarts() const {
@@ -138,11 +140,14 @@ class Block::Iter : public Iterator {
 
   virtual void Next() {
     assert(Valid());
+  //std::cout << "Next 0" << std::endl;
     ParseNextKey();
+  //std::cout << "Next 1" << std::endl;
   }
 
   virtual void Prev() {
     assert(Valid());
+//std::cout << "Prev 0" << std::endl;
 
     // Scan backwards to a restart point before current_
     const uint32_t original = current_;
@@ -160,6 +165,7 @@ class Block::Iter : public Iterator {
     do {
       // Loop until end of current entry hits the start of original entry
     } while (ParseNextKey() && NextEntryOffset() < original);
+//std::cout << "Prev 1" << std::endl;
   }
 
   virtual void Seek(const Slice& target) {
@@ -174,6 +180,7 @@ class Block::Iter : public Iterator {
       const char* key_ptr = DecodeEntry(data_ + region_offset,
                                         data_ + restarts_,
                                         &shared, &non_shared, &value_length);
+//std::cout << "Seek 0" << std::endl;
       if (key_ptr == nullptr || (shared != 0)) {
         CorruptionError();
         return;
@@ -200,27 +207,34 @@ class Block::Iter : public Iterator {
         return;
       }
     }
+//std::cout << "Seek 1" << std::endl;
   }
 
   virtual void SeekToFirst() {
     SeekToRestartPoint(0);
+//std::cout << "SeekToFirst 0" << std::endl;
     ParseNextKey();
+//std::cout << "SeekToFirst 1" << std::endl;
   }
 
   virtual void SeekToLast() {
+//std::cout << "SeekToLast 0" << std::endl;
     SeekToRestartPoint(num_restarts_ - 1);
     while (ParseNextKey() && NextEntryOffset() < restarts_) {
       // Keep skipping
     }
+//std::cout << "SeekToLast 1" << std::endl;
   }
 
  private:
   void CorruptionError() {
+//std::cout << "Block FUCK 0" << std::endl;
     current_ = restarts_;
     restart_index_ = num_restarts_;
     status_ = Status::Corruption("bad entry in block");
     key_.clear();
     value_.clear();
+//std::cout << "Block FUCK 1" << std::endl;
   }
 
   bool ParseNextKey() {
@@ -238,6 +252,14 @@ class Block::Iter : public Iterator {
     uint32_t shared, non_shared, value_length;
     p = DecodeEntry(p, limit, &shared, &non_shared, &value_length);
     if (p == nullptr || key_.size() < shared) {
+	/*
+	std::cout << "ParseNextKey Error" << std::endl;
+	std::cout << current_ << std::endl;
+	if(p==nullptr)
+		std::cout << 0 << std::endl;
+	else
+		std::cout << 1 << std::endl;
+	*/
       CorruptionError();
       return false;
     } else {

@@ -37,7 +37,7 @@ TEST(EnvTest, ReadWrite) {
   ASSERT_OK(env_->GetTestDirectory(&test_dir));
   std::string test_file_name = test_dir + "/open_on_read.txt";
   WritableFile* writable_file;
-  ASSERT_OK(env_->NewWritableFile(test_file_name, &writable_file));
+  ASSERT_OK(env_->NewWritableFile(test_file_name, 0, 0, &writable_file));//Test
 
   // Fill a file with data generated via a sequence of randomly sized writes.
   static const size_t kDataSize = 10 * 1048576;
@@ -175,13 +175,13 @@ TEST(EnvTest, ReopenWritableFile) {
   env_->DeleteFile(test_file_name);
 
   WritableFile* writable_file;
-  ASSERT_OK(env_->NewWritableFile(test_file_name, &writable_file));
+  ASSERT_OK(env_->NewWritableFile(test_file_name, 0, 0, &writable_file));//Test
   std::string data("hello world!");
   ASSERT_OK(writable_file->Append(data));
   ASSERT_OK(writable_file->Close());
   delete writable_file;
 
-  ASSERT_OK(env_->NewWritableFile(test_file_name, &writable_file));
+  ASSERT_OK(env_->NewWritableFile(test_file_name, 0, 0, &writable_file));//Test
   data = "42";
   ASSERT_OK(writable_file->Append(data));
   ASSERT_OK(writable_file->Close());
@@ -199,13 +199,13 @@ TEST(EnvTest, ReopenAppendableFile) {
   env_->DeleteFile(test_file_name);
 
   WritableFile* appendable_file;
-  ASSERT_OK(env_->NewAppendableFile(test_file_name, &appendable_file));
+  ASSERT_OK(env_->NewAppendableFile(test_file_name, 0, 0, &appendable_file));//Test
   std::string data("hello world!");
   ASSERT_OK(appendable_file->Append(data));
   ASSERT_OK(appendable_file->Close());
   delete appendable_file;
 
-  ASSERT_OK(env_->NewAppendableFile(test_file_name, &appendable_file));
+  ASSERT_OK(env_->NewAppendableFile(test_file_name, 0, 0, &appendable_file));//Test
   data = "42";
   ASSERT_OK(appendable_file->Append(data));
   ASSERT_OK(appendable_file->Close());

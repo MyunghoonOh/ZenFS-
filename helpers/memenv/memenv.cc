@@ -266,7 +266,7 @@ class InMemoryEnv : public EnvWrapper {
     return Status::OK();
   }
 
-  virtual Status NewWritableFile(const std::string& fname,
+  virtual Status NewWritableFile(const std::string& fname, unsigned int level, unsigned int flag, 
                                  WritableFile** result) {
     MutexLock lock(&mutex_);
     if (file_map_.find(fname) != file_map_.end()) {
@@ -281,7 +281,7 @@ class InMemoryEnv : public EnvWrapper {
     return Status::OK();
   }
 
-  virtual Status NewAppendableFile(const std::string& fname,
+  virtual Status NewAppendableFile(const std::string& fname, unsigned int level, unsigned int flag, 
                                    WritableFile** result) {
     MutexLock lock(&mutex_);
     FileState** sptr = &file_map_[fname];

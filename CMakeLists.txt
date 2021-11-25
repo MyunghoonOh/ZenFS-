@@ -35,6 +35,11 @@ check_symbol_exists(fdatasync "unistd.h" HAVE_FDATASYNC)
 
 include(CheckCXXSourceCompiles)
 
+#HOON
+#+++++++++++++++++++++++
+#LINK_LIBRARIES ( zbc )
+#set(CMAKE_BUILD_TYPE Debug)
+
 # Test whether -Wthread-safety is available. See
 # https://clang.llvm.org/docs/ThreadSafetyAnalysis.html
 # -Werror is necessary because unknown attributes only generate warnings.
@@ -180,6 +185,28 @@ target_sources(leveldb
     "${PROJECT_SOURCE_DIR}/util/posix_logger.h"
 )
 
+# Zoad
+target_sources(leveldb
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/util/env_zoad.cc"
+    "${PROJECT_SOURCE_DIR}/util/posix_logger.h"
+
+    "${PROJECT_SOURCE_DIR}/util/zoad/IO_request.cpp"
+    "${PROJECT_SOURCE_DIR}/util/zoad/IO_request.h"
+    "${PROJECT_SOURCE_DIR}/util/zoad/IZG.cpp"
+    "${PROJECT_SOURCE_DIR}/util/zoad/IZG.h"
+    "${PROJECT_SOURCE_DIR}/util/zoad/Partition.cpp"
+    "${PROJECT_SOURCE_DIR}/util/zoad/Partition.h"
+    "${PROJECT_SOURCE_DIR}/util/zoad/Userdata.cpp"
+    "${PROJECT_SOURCE_DIR}/util/zoad/Userdata.h"
+    "${PROJECT_SOURCE_DIR}/util/zoad/Zone.cpp"
+    "${PROJECT_SOURCE_DIR}/util/zoad/Zone.h"
+    "${PROJECT_SOURCE_DIR}/util/zoad/controller.c"
+   "${PROJECT_SOURCE_DIR}/util/zoad/controller.h"
+   "${PROJECT_SOURCE_DIR}/util/zoad/zoad.cpp"
+   "${PROJECT_SOURCE_DIR}/util/zoad/zoad.h"
+)
+
 # MemEnv is not part of the interface and could be pulled to a separate library.
 target_sources(leveldb
   PRIVATE
@@ -310,6 +337,7 @@ if(LEVELDB_BUILD_TESTS)
     # TODO(costan): This test also uses
     #               "${PROJECT_SOURCE_DIR}/util/env_posix_test_helper.h"
     leveldb_test("${PROJECT_SOURCE_DIR}/util/env_posix_test.cc")
+    #leveldb_test("${PROJECT_SOURCE_DIR}/util/env_zone_test.cc")
   endif(NOT BUILD_SHARED_LIBS)
 endif(LEVELDB_BUILD_TESTS)
 

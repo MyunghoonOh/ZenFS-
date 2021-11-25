@@ -10,6 +10,9 @@
 #include "util/testharness.h"
 #include <string>
 #include <vector>
+#include <iostream>
+
+using namespace std;
 
 namespace leveldb {
 
@@ -18,7 +21,8 @@ class MemEnvTest {
   Env* env_;
 
   MemEnvTest()
-      : env_(NewMemEnv(Env::Default())) {
+     : env_(NewMemEnv(Env::Default())) {
+
   }
   ~MemEnvTest() {
     delete env_;
@@ -37,13 +41,13 @@ TEST(MemEnvTest, Basics) {
   ASSERT_TRUE(!env_->GetFileSize("/dir/non_existent", &file_size).ok());
   ASSERT_OK(env_->GetChildren("/dir", &children));
   ASSERT_EQ(0, children.size());
-
+  cout << "0" << endl;
   // Create a file.
-  ASSERT_OK(env_->NewWritableFile("/dir/f", &writable_file));
+  ASSERT_OK(env_->NewWritableFile("/dir/f", 0, 0,&writable_file));//MemEnv
   ASSERT_OK(env_->GetFileSize("/dir/f", &file_size));
   ASSERT_EQ(0, file_size);
-  delete writable_file;
-
+  //delete writable_file;
+  cout << "1" << endl;
   // Check that the file exists.
   ASSERT_TRUE(env_->FileExists("/dir/f"));
   ASSERT_OK(env_->GetFileSize("/dir/f", &file_size));
@@ -51,23 +55,23 @@ TEST(MemEnvTest, Basics) {
   ASSERT_OK(env_->GetChildren("/dir", &children));
   ASSERT_EQ(1, children.size());
   ASSERT_EQ("f", children[0]);
-
+  cout << "2" << endl;
   // Write to the file.
-  ASSERT_OK(env_->NewWritableFile("/dir/f", &writable_file));
+  ASSERT_OK(env_->NewWritableFile("/dir/f", 0, 0, &writable_file));//MemEnv
   ASSERT_OK(writable_file->Append("abc"));
-  delete writable_file;
-
+  //delete writable_file;
+  cout << "3" << endl;
   // Check that append works.
-  ASSERT_OK(env_->NewAppendableFile("/dir/f", &writable_file));
+  ASSERT_OK(env_->NewAppendableFile("/dir/f", 0, 0, &writable_file));//MemEnv
   ASSERT_OK(env_->GetFileSize("/dir/f", &file_size));
   ASSERT_EQ(3, file_size);
   ASSERT_OK(writable_file->Append("hello"));
-  delete writable_file;
-
+  //delete writable_file;
+  cout << "4" << endl;
   // Check for expected size.
   ASSERT_OK(env_->GetFileSize("/dir/f", &file_size));
   ASSERT_EQ(8, file_size);
-
+  cout << "5" << endl;
   // Check that renaming works.
   ASSERT_TRUE(!env_->RenameFile("/dir/non_existent", "/dir/g").ok());
   ASSERT_OK(env_->RenameFile("/dir/f", "/dir/g"));
@@ -75,7 +79,7 @@ TEST(MemEnvTest, Basics) {
   ASSERT_TRUE(env_->FileExists("/dir/g"));
   ASSERT_OK(env_->GetFileSize("/dir/g", &file_size));
   ASSERT_EQ(8, file_size);
-
+  cout << "6" << endl;
   // Check that opening non-existent file fails.
   SequentialFile* seq_file;
   RandomAccessFile* rand_file;
@@ -83,7 +87,7 @@ TEST(MemEnvTest, Basics) {
   ASSERT_TRUE(!seq_file);
   ASSERT_TRUE(!env_->NewRandomAccessFile("/dir/non_existent", &rand_file).ok());
   ASSERT_TRUE(!rand_file);
-
+  cout << "7" << endl;
   // Check that deleting works.
   ASSERT_TRUE(!env_->DeleteFile("/dir/non_existent").ok());
   ASSERT_OK(env_->DeleteFile("/dir/g"));
@@ -91,6 +95,7 @@ TEST(MemEnvTest, Basics) {
   ASSERT_OK(env_->GetChildren("/dir", &children));
   ASSERT_EQ(0, children.size());
   ASSERT_OK(env_->DeleteDir("/dir"));
+  cout << "8" << endl;
 }
 
 TEST(MemEnvTest, ReadWrite) {
@@ -100,9 +105,10 @@ TEST(MemEnvTest, ReadWrite) {
   Slice result;
   char scratch[100];
 
+  cout << "JJ" << endl;
   ASSERT_OK(env_->CreateDir("/dir"));
 
-  ASSERT_OK(env_->NewWritableFile("/dir/f", &writable_file));
+  ASSERT_OK(env_->NewWritableFile("/dir/f", 0, 0, &writable_file));//MemEnv
   ASSERT_OK(writable_file->Append("hello "));
   ASSERT_OK(writable_file->Append("world"));
   delete writable_file;
@@ -149,7 +155,7 @@ TEST(MemEnvTest, Misc) {
   ASSERT_TRUE(!test_dir.empty());
 
   WritableFile* writable_file;
-  ASSERT_OK(env_->NewWritableFile("/a/b", &writable_file));
+  ASSERT_OK(env_->NewWritableFile("/a/b", 0, 0, &writable_file));//MemEnv
 
   // These are no-ops, but we test they return success.
   ASSERT_OK(writable_file->Sync());
@@ -168,7 +174,7 @@ TEST(MemEnvTest, LargeWrite) {
   }
 
   WritableFile* writable_file;
-  ASSERT_OK(env_->NewWritableFile("/dir/f", &writable_file));
+  ASSERT_OK(env_->NewWritableFile("/dir/f", 0, 0, &writable_file));//MemEnv
   ASSERT_OK(writable_file->Append("foo"));
   ASSERT_OK(writable_file->Append(write_data));
   delete writable_file;

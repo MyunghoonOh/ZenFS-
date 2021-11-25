@@ -36,24 +36,24 @@ class ErrorEnv : public EnvWrapper {
                writable_file_error_(false),
                num_writable_file_errors_(0) { }
 
-  virtual Status NewWritableFile(const std::string& fname,
+  virtual Status NewWritableFile(const std::string& fname, unsigned int level, unsigned int flag, 
                                  WritableFile** result) {
     if (writable_file_error_) {
       ++num_writable_file_errors_;
       *result = nullptr;
       return Status::IOError(fname, "fake error");
     }
-    return target()->NewWritableFile(fname, result);
+    return target()->NewWritableFile(fname, level, flag, result);
   }
 
-  virtual Status NewAppendableFile(const std::string& fname,
+  virtual Status NewAppendableFile(const std::string& fname, unsigned int level, unsigned int flag, 
                                    WritableFile** result) {
     if (writable_file_error_) {
       ++num_writable_file_errors_;
       *result = nullptr;
       return Status::IOError(fname, "fake error");
     }
-    return target()->NewAppendableFile(fname, result);
+    return target()->NewAppendableFile(fname, level, flag, result);
   }
 };
 

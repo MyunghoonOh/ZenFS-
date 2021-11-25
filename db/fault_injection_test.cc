@@ -66,7 +66,7 @@ Status Truncate(const std::string& filename, uint64_t length) {
   if (s.ok()) {
     std::string tmp_name = GetDirName(filename) + "/truncate.tmp";
     WritableFile* tmp_file;
-    s = env->NewWritableFile(tmp_name, &tmp_file);
+    s = env->NewWritableFile(tmp_name, 0, 0, &tmp_file);//Test
     if (s.ok()) {
       s = tmp_file->Append(result);
       delete tmp_file;
@@ -131,9 +131,9 @@ class FaultInjectionTestEnv : public EnvWrapper {
   FaultInjectionTestEnv()
       : EnvWrapper(Env::Default()), filesystem_active_(true) {}
   virtual ~FaultInjectionTestEnv() { }
-  virtual Status NewWritableFile(const std::string& fname,
+  virtual Status NewWritableFile(const std::string& fname, unsigned int level, unsigned int flag,
                                  WritableFile** result);
-  virtual Status NewAppendableFile(const std::string& fname,
+  virtual Status NewAppendableFile(const std::string& fname, unsigned int level, unsigned int flag,
                                    WritableFile** result);
   virtual Status DeleteFile(const std::string& f);
   virtual Status RenameFile(const std::string& s, const std::string& t);
@@ -233,10 +233,10 @@ Status TestWritableFile::Sync() {
   return s;
 }
 
-Status FaultInjectionTestEnv::NewWritableFile(const std::string& fname,
+Status FaultInjectionTestEnv::NewWritableFile(const std::string& fname, unsigned int level, unsigned int flag,
                                               WritableFile** result) {
   WritableFile* actual_writable_file;
-  Status s = target()->NewWritableFile(fname, &actual_writable_file);
+  Status s = target()->NewWritableFile(fname, 0, 0, &actual_writable_file);//Test
   if (s.ok()) {
     FileState state(fname);
     state.pos_ = 0;
@@ -251,10 +251,10 @@ Status FaultInjectionTestEnv::NewWritableFile(const std::string& fname,
   return s;
 }
 
-Status FaultInjectionTestEnv::NewAppendableFile(const std::string& fname,
+Status FaultInjectionTestEnv::NewAppendableFile(const std::string& fname, unsigned int level, unsigned int flag,
                                                 WritableFile** result) {
   WritableFile* actual_writable_file;
-  Status s = target()->NewAppendableFile(fname, &actual_writable_file);
+  Status s = target()->NewAppendableFile(fname, 0, 0, &actual_writable_file);//Test
   if (s.ok()) {
     FileState state(fname);
     state.pos_ = 0;

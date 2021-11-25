@@ -33,7 +33,7 @@ class RecoveryTest {
 
   bool CanAppend() {
     WritableFile* tmp;
-    Status s = env_->NewAppendableFile(CurrentFileName(dbname_), &tmp);
+    Status s = env_->NewAppendableFile(CurrentFileName(dbname_), 0, 0, &tmp);//Test
     delete tmp;
     if (s.IsNotSupportedError()) {
       return false;
@@ -148,7 +148,7 @@ class RecoveryTest {
   void MakeLogFile(uint64_t lognum, SequenceNumber seq, Slice key, Slice val) {
     std::string fname = LogFileName(dbname_, lognum);
     WritableFile* file;
-    ASSERT_OK(env_->NewWritableFile(fname, &file));
+    ASSERT_OK(env_->NewWritableFile(fname, 0, 0, &file));//Test
     log::Writer writer(file);
     WriteBatch batch;
     batch.Put(key, val);
@@ -193,7 +193,7 @@ TEST(RecoveryTest, LargeManifestCompacted) {
   {
     uint64_t len = FileSize(old_manifest);
     WritableFile* file;
-    ASSERT_OK(env()->NewAppendableFile(old_manifest, &file));
+    ASSERT_OK(env()->NewAppendableFile(old_manifest, 0, 0, &file));//Test
     std::string zeroes(3*1048576 - static_cast<size_t>(len), 0);
     ASSERT_OK(file->Append(zeroes));
     ASSERT_OK(file->Flush());

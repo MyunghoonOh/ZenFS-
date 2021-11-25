@@ -127,7 +127,7 @@ class SpecialEnv : public EnvWrapper {
     manifest_write_error_.Release_Store(nullptr);
   }
 
-  Status NewWritableFile(const std::string& f, WritableFile** r) {
+  Status NewWritableFile(const std::string& f, unsigned int level, unsigned int flag, WritableFile** r) {
     class DataFile : public WritableFile {
      private:
       SpecialEnv* env_;
@@ -188,7 +188,7 @@ class SpecialEnv : public EnvWrapper {
       return Status::IOError("simulated write error");
     }
 
-    Status s = target()->NewWritableFile(f, r);
+    Status s = target()->NewWritableFile(f, 0, 0, r);//Test
     if (s.ok()) {
       if (strstr(f.c_str(), ".ldb") != nullptr ||
           strstr(f.c_str(), ".log") != nullptr) {

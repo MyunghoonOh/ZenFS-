@@ -10,6 +10,8 @@
 #include "util/coding.h"
 #include "util/crc32c.h"
 
+#include "util/zoad/controller.h"
+#include <iostream>
 namespace leveldb {
 
 void BlockHandle::EncodeTo(std::string* dst) const {
@@ -73,13 +75,29 @@ Status ReadBlock(RandomAccessFile* file,
   // Read the block contents as well as the type/crc footer.
   // See table_builder.cc for the code that built this structure.
   size_t n = static_cast<size_t>(handle.size());
-  char* buf = new char[n + kBlockTrailerSize];
+  size_t n2 = (n + kBlockTrailerSize)/IO_SIZE;
+  n2 *= IO_SIZE;
+  if((n + kBlockTrailerSize) % IO_SIZE){
+    n2 += IO_SIZE;
+  }
+  if(handle.offset()%IO_SIZE + n + kBlockTrailerSize > IO_SIZE){
+    n2 += IO_SIZE - handle.offset()%IO_SIZE;
+  }
+  //char* buf = new char[n + kBlockTrailerSize];
+  //char* buf = new char[n2 + (IO_SIZE - handle.offset()%IO_SIZE)];
+  char* buf = new char[n2];
+
   Slice contents;
+  //std::cout << "ReadBlock 1 " << handle.offset() << " " << n + kBlockTrailerSize << " " << n2 + IO_SIZE - handle.offset()%IO_SIZE << " " << n2 << " " << handle.offset()%IO_SIZE << std::endl; 
   Status s = file->Read(handle.offset(), n + kBlockTrailerSize, &contents, buf);
+  //std::cout << "ReadBlock 2 " << n2 << std::endl;
+  //std::cout << "ReadBlock 3 " << IO_SIZE - handle.offset()%IO_SIZE << std::endl;
+  
   if (!s.ok()) {
     delete[] buf;
     return s;
   }
+
   if (contents.size() != n + kBlockTrailerSize) {
     delete[] buf;
     return Status::Corruption("truncated block read");
@@ -96,47 +114,68 @@ Status ReadBlock(RandomAccessFile* file,
       return s;
     }
   }
+  //std::cout << "ReadBlock 3 : " << contents.size() << " " << n2 << std::endl;
 
   switch (data[n]) {
     case kNoCompression:
+  //std::cout << "ReadBlock 3.1" << std::endl;
       if (data != buf) {
+  //std::cout << "ReadBlock 3.2" << std::endl;
         // File implementation gave us pointer to some other data.
         // Use it directly under the assumption that it will be live
         // while the file is open.
         delete[] buf;
+  //std::cout << "ReadBlock 3.3" << std::endl;
         result->data = Slice(data, n);
         result->heap_allocated = false;
         result->cachable = false;  // Do not double-cache
+  //std::cout << "ReadBlock 3.4" << std::endl;
       } else {
+  //std::cout << "ReadBlock 3.5" << std::endl;
         result->data = Slice(buf, n);
         result->heap_allocated = true;
         result->cachable = true;
+  //std::cout << "ReadBlock 3.6" << std::endl;
       }
 
       // Ok
       break;
     case kSnappyCompression: {
+  //std::cout << "ReadBlock 3.7" << std::endl;
       size_t ulength = 0;
       if (!port::Snappy_GetUncompressedLength(data, n, &ulength)) {
+  //std::cout << "ReadBlock 3.8" << std::endl;
         delete[] buf;
+  //std::cout << "ReadBlock 3.9" << std::endl;
         return Status::Corruption("corrupted compressed block contents");
       }
       char* ubuf = new char[ulength];
       if (!port::Snappy_Uncompress(data, n, ubuf)) {
+  //std::cout << "ReadBlock 3.10" << std::endl;
         delete[] buf;
         delete[] ubuf;
+  //std::cout << "ReadBlock 3.11" << std::endl;
         return Status::Corruption("corrupted compressed block contents");
       }
+  //std::cout << "ReadBlock 3.12" << std::endl;
       delete[] buf;
       result->data = Slice(ubuf, ulength);
       result->heap_allocated = true;
       result->cachable = true;
+  //std::cout << "ReadBlock 3.13" << std::endl;
       break;
     }
     default:
+  //std::cout << "ReadBlock 3.14" << std::endl;
+  //std::cout << handle.offset() << " " << n + kBlockTrailerSize <<  " - data[n] : " << data[n] << std::endl;
+  //std::cout << kBlockTrailerSize << std::endl;
+  //exit(0);
       delete[] buf;
+  //std::cout << "ReadBlock 3.15" << std::endl;
       return Status::Corruption("bad block type");
   }
+//std::cout << "ReadBlock 4" << std::endl;
+
 
   return Status::OK();
 }

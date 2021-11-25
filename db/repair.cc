@@ -325,7 +325,7 @@ class Repairer {
     // Create builder.
     std::string copy = TableFileName(dbname_, next_file_number_++);
     WritableFile* file;
-    Status s = env_->NewWritableFile(copy, &file);
+    Status s = env_->NewWritableFile(copy, 1, 1, &file);//Repair
     if (!s.ok()) {
       return;
     }
@@ -375,7 +375,7 @@ class Repairer {
   Status WriteDescriptor() {
     std::string tmp = TempFileName(dbname_, 1);
     WritableFile* file;
-    Status status = env_->NewWritableFile(tmp, &file);
+    Status status = env_->NewWritableFile(tmp, 0, 0, &file);//Log
     if (!status.ok()) {
       return status;
     }

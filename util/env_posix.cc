@@ -1,7 +1,6 @@
 // Copyright (c) 2011 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
-
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -48,7 +47,7 @@ namespace {
 static int open_read_only_file_limit = -1;
 static int mmap_limit = -1;
 
-constexpr const size_t kWritableFileBufferSize = 65536;
+constexpr const size_t kWritableFileBufferSize = 196608;//65536;
 
 static Status PosixError(const std::string& context, int err_number) {
   if (err_number == ENOENT) {
@@ -96,6 +95,8 @@ class Limiter {
   // it can be operated on safely using std::memory_order_relaxed.
   std::atomic<int> acquires_allowed_;
 };
+
+//*************************************************
 
 class PosixSequentialFile: public SequentialFile {
  private:
@@ -279,15 +280,17 @@ class PosixWritableFile final : public WritableFile {
     // This needs to happen before the manifest file is flushed to disk, to
     // avoid crashing in a state where the manifest refers to files that are not
     // yet on disk.
-    Status status = SyncDirIfManifest();
-    if (!status.ok()) {
-      return status;
-    }
+    //Status status = SyncDirIfManifest();
+    //if (!status.ok()) {
+    //  return status;
+    //}
 
-    status = FlushBuffer();
-    if (status.ok() && ::fdatasync(fd_) != 0) {
-      status = PosixError(filename_, errno);
-    }
+    //status = FlushBuffer();
+    //if (status.ok() && ::fdatasync(fd_) != 0) {
+    //  status = PosixError(filename_, errno);
+    //}
+    //return status;
+    Status status = Status::OK();
     return status;
   }
 
@@ -323,9 +326,9 @@ class PosixWritableFile final : public WritableFile {
     if (fd < 0) {
       status = PosixError(dirname_, errno);
     } else {
-      if (::fsync(fd) < 0) {
-        status = PosixError(dirname_, errno);
-      }
+      //if (::fsync(fd) < 0) {
+      //  status = PosixError(dirname_, errno);
+      //}
       ::close(fd);
     }
     return status;
@@ -465,7 +468,7 @@ class PosixEnv : public Env {
     return s;
   }
 
-  virtual Status NewWritableFile(const std::string& fname,
+  virtual Status NewWritableFile(const std::string& fname, unsigned int level, unsigned int flag, 
                                  WritableFile** result) {
     Status s;
     int fd = open(fname.c_str(), O_TRUNC | O_WRONLY | O_CREAT, 0644);
@@ -478,7 +481,7 @@ class PosixEnv : public Env {
     return s;
   }
 
-  virtual Status NewAppendableFile(const std::string& fname,
+  virtual Status NewAppendableFile(const std::string& fname, unsigned int level, unsigned int flag, 
                                    WritableFile** result) {
     Status s;
     int fd = open(fname.c_str(), O_APPEND | O_WRONLY | O_CREAT, 0644);
