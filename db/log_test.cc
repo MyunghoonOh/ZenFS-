@@ -1,16 +1,24 @@
+//  Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
+//  This source code is licensed under both the GPLv2 (found in the
+//  COPYING file in the root directory) and Apache 2.0 License
+//  (found in the LICENSE.Apache file in the root directory).
+//
 // Copyright (c) 2011 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
 #include "db/log_reader.h"
 #include "db/log_writer.h"
-#include "leveldb/env.h"
+#include "file/sequence_file_reader.h"
+#include "file/writable_file_writer.h"
+#include "rocksdb/env.h"
+#include "test_util/testharness.h"
+#include "test_util/testutil.h"
 #include "util/coding.h"
 #include "util/crc32c.h"
 #include "util/random.h"
-#include "util/testharness.h"
 
-namespace leveldb {
+namespace ROCKSDB_NAMESPACE {
 namespace log {
 
 // Construct a string of the specified length made out of the supplied
@@ -36,55 +44,80 @@ static std::string RandomSkewedString(int i, Random* rnd) {
   return BigString(NumberString(i), rnd->Skewed(17));
 }
 
-class LogTest {
+// Param type is tuple<int, bool>
+// get<0>(tuple): non-zero if recycling log, zero if regular log
+// get<1>(tuple): true if allow retry after read EOF, false otherwise
+class LogTest : public ::testing::TestWithParam<std::tuple<int, bool>> {
  private:
-  class StringDest : public WritableFile {
+  class StringSource : public FSSequentialFile {
    public:
-    std::string contents_;
-
-    virtual Status Close() { return Status::OK(); }
-    virtual Status Flush() { return Status::OK(); }
-    virtual Status Sync() { return Status::OK(); }
-    virtual Status Append(const Slice& slice) {
-      contents_.append(slice.data(), slice.size());
-      return Status::OK();
-    }
-  };
-
-  class StringSource : public SequentialFile {
-   public:
-    Slice contents_;
+    Slice& contents_;
     bool force_error_;
+    size_t force_error_position_;
+    bool force_eof_;
+    size_t force_eof_position_;
     bool returned_partial_;
-    StringSource() : force_error_(false), returned_partial_(false) { }
+    bool fail_after_read_partial_;
+    explicit StringSource(Slice& contents, bool fail_after_read_partial)
+        : contents_(contents),
+          force_error_(false),
+          force_error_position_(0),
+          force_eof_(false),
+          force_eof_position_(0),
+          returned_partial_(false),
+          fail_after_read_partial_(fail_after_read_partial) {}
 
-    virtual Status Read(size_t n, Slice* result, char* scratch) {
-      ASSERT_TRUE(!returned_partial_) << "must not Read() after eof/error";
+    IOStatus Read(size_t n, const IOOptions& /*opts*/, Slice* result,
+                  char* scratch, IODebugContext* /*dbg*/) override {
+      if (fail_after_read_partial_) {
+        EXPECT_TRUE(!returned_partial_) << "must not Read() after eof/error";
+      }
 
       if (force_error_) {
-        force_error_ = false;
-        returned_partial_ = true;
-        return Status::Corruption("read error");
+        if (force_error_position_ >= n) {
+          force_error_position_ -= n;
+        } else {
+          *result = Slice(contents_.data(), force_error_position_);
+          contents_.remove_prefix(force_error_position_);
+          force_error_ = false;
+          returned_partial_ = true;
+          return IOStatus::Corruption("read error");
+        }
       }
 
       if (contents_.size() < n) {
         n = contents_.size();
         returned_partial_ = true;
       }
-      *result = Slice(contents_.data(), n);
+
+      if (force_eof_) {
+        if (force_eof_position_ >= n) {
+          force_eof_position_ -= n;
+        } else {
+          force_eof_ = false;
+          n = force_eof_position_;
+          returned_partial_ = true;
+        }
+      }
+
+      // By using scratch we ensure that caller has control over the
+      // lifetime of result.data()
+      memcpy(scratch, contents_.data(), n);
+      *result = Slice(scratch, n);
+
       contents_.remove_prefix(n);
-      return Status::OK();
+      return IOStatus::OK();
     }
 
-    virtual Status Skip(uint64_t n) {
+    IOStatus Skip(uint64_t n) override {
       if (n > contents_.size()) {
         contents_.clear();
-        return Status::NotFound("in-memory file skipped past end");
+        return IOStatus::NotFound("in-memory file skipepd past end");
       }
 
       contents_.remove_prefix(n);
 
-      return Status::OK();
+      return IOStatus::OK();
     }
   };
 
@@ -94,85 +127,97 @@ class LogTest {
     std::string message_;
 
     ReportCollector() : dropped_bytes_(0) { }
-    virtual void Corruption(size_t bytes, const Status& status) {
+    void Corruption(size_t bytes, const Status& status) override {
       dropped_bytes_ += bytes;
       message_.append(status.ToString());
     }
   };
 
-  StringDest dest_;
-  StringSource source_;
-  ReportCollector report_;
-  bool reading_;
-  Writer* writer_;
-  Reader* reader_;
+  std::string& dest_contents() { return sink_->contents_; }
 
-  // Record metadata for testing initial offset functionality
-  static size_t initial_offset_record_sizes_[];
-  static uint64_t initial_offset_last_record_offsets_[];
-  static int num_initial_offset_records_;
+  const std::string& dest_contents() const { return sink_->contents_; }
+
+  void reset_source_contents() { source_->contents_ = dest_contents(); }
+
+  Slice reader_contents_;
+  test::StringSink* sink_;
+  StringSource* source_;
+  ReportCollector report_;
+  std::unique_ptr<Writer> writer_;
+  std::unique_ptr<Reader> reader_;
+
+ protected:
+  bool allow_retry_read_;
 
  public:
-  LogTest() : reading_(false),
-              writer_(new Writer(&dest_)),
-              reader_(new Reader(&source_, &report_, true/*checksum*/,
-                      0/*initial_offset*/)) {
+  LogTest()
+      : reader_contents_(),
+        sink_(new test::StringSink(&reader_contents_)),
+        source_(new StringSource(reader_contents_, !std::get<1>(GetParam()))),
+        allow_retry_read_(std::get<1>(GetParam())) {
+    std::unique_ptr<FSWritableFile> sink_holder(sink_);
+    std::unique_ptr<WritableFileWriter> file_writer(new WritableFileWriter(
+        std::move(sink_holder), "" /* don't care */, FileOptions()));
+    writer_.reset(
+        new Writer(std::move(file_writer), 123, std::get<0>(GetParam())));
+    std::unique_ptr<FSSequentialFile> source_holder(source_);
+    std::unique_ptr<SequentialFileReader> file_reader(
+        new SequentialFileReader(std::move(source_holder), "" /* file name */));
+    if (allow_retry_read_) {
+      reader_.reset(new FragmentBufferedReader(nullptr, std::move(file_reader),
+                                               &report_, true /* checksum */,
+                                               123 /* log_number */));
+    } else {
+      reader_.reset(new Reader(nullptr, std::move(file_reader), &report_,
+                               true /* checksum */, 123 /* log_number */));
+    }
   }
 
-  ~LogTest() {
-    delete writer_;
-    delete reader_;
-  }
-
-  void ReopenForAppend() {
-    delete writer_;
-    writer_ = new Writer(&dest_, dest_.contents_.size());
-  }
+  Slice* get_reader_contents() { return &reader_contents_; }
 
   void Write(const std::string& msg) {
-    ASSERT_TRUE(!reading_) << "Write() after starting to read";
-    writer_->AddRecord(Slice(msg));
+    ASSERT_OK(writer_->AddRecord(Slice(msg)));
   }
 
   size_t WrittenBytes() const {
-    return dest_.contents_.size();
+    return dest_contents().size();
   }
 
-  std::string Read() {
-    if (!reading_) {
-      reading_ = true;
-      source_.contents_ = Slice(dest_.contents_);
-    }
+  std::string Read(const WALRecoveryMode wal_recovery_mode =
+                       WALRecoveryMode::kTolerateCorruptedTailRecords) {
     std::string scratch;
     Slice record;
-    if (reader_->ReadRecord(&record, &scratch)) {
+    bool ret = false;
+    ret = reader_->ReadRecord(&record, &scratch, wal_recovery_mode);
+    if (ret) {
       return record.ToString();
     } else {
       return "EOF";
     }
   }
 
-  void IncrementByte(int offset, int delta) {
-    dest_.contents_[offset] += delta;
+  void IncrementByte(int offset, char delta) {
+    dest_contents()[offset] += delta;
   }
 
   void SetByte(int offset, char new_byte) {
-    dest_.contents_[offset] = new_byte;
+    dest_contents()[offset] = new_byte;
   }
 
-  void ShrinkSize(int bytes) {
-    dest_.contents_.resize(dest_.contents_.size() - bytes);
-  }
+  void ShrinkSize(int bytes) { sink_->Drop(bytes); }
 
-  void FixChecksum(int header_offset, int len) {
+  void FixChecksum(int header_offset, int len, bool recyclable) {
     // Compute crc of type/len/data
-    uint32_t crc = crc32c::Value(&dest_.contents_[header_offset+6], 1 + len);
+    int header_size = recyclable ? kRecyclableHeaderSize : kHeaderSize;
+    uint32_t crc = crc32c::Value(&dest_contents()[header_offset + 6],
+                                 header_size - 6 + len);
     crc = crc32c::Mask(crc);
-    EncodeFixed32(&dest_.contents_[header_offset], crc);
+    EncodeFixed32(&dest_contents()[header_offset], crc);
   }
 
-  void ForceError() {
-    source_.force_error_ = true;
+  void ForceError(size_t position = 0) {
+    source_->force_error_ = true;
+    source_->force_error_position_ = position;
   }
 
   size_t DroppedBytes() const {
@@ -183,6 +228,18 @@ class LogTest {
     return report_.message_;
   }
 
+  void ForceEOF(size_t position = 0) {
+    source_->force_eof_ = true;
+    source_->force_eof_position_ = position;
+  }
+
+  void UnmarkEOF() {
+    source_->returned_partial_ = false;
+    reader_->UnmarkEOF();
+  }
+
+  bool IsEOF() { return reader_->IsEOF(); }
+
   // Returns OK iff recorded error message contains "msg"
   std::string MatchError(const std::string& msg) const {
     if (report_.message_.find(msg) == std::string::npos) {
@@ -191,87 +248,11 @@ class LogTest {
       return "OK";
     }
   }
-
-  void WriteInitialOffsetLog() {
-    for (int i = 0; i < num_initial_offset_records_; i++) {
-      std::string record(initial_offset_record_sizes_[i],
-                         static_cast<char>('a' + i));
-      Write(record);
-    }
-  }
-
-  void StartReadingAt(uint64_t initial_offset) {
-    delete reader_;
-    reader_ = new Reader(&source_, &report_, true/*checksum*/, initial_offset);
-  }
-
-  void CheckOffsetPastEndReturnsNoRecords(uint64_t offset_past_end) {
-    WriteInitialOffsetLog();
-    reading_ = true;
-    source_.contents_ = Slice(dest_.contents_);
-    Reader* offset_reader = new Reader(&source_, &report_, true/*checksum*/,
-                                       WrittenBytes() + offset_past_end);
-    Slice record;
-    std::string scratch;
-    ASSERT_TRUE(!offset_reader->ReadRecord(&record, &scratch));
-    delete offset_reader;
-  }
-
-  void CheckInitialOffsetRecord(uint64_t initial_offset,
-                                int expected_record_offset) {
-    WriteInitialOffsetLog();
-    reading_ = true;
-    source_.contents_ = Slice(dest_.contents_);
-    Reader* offset_reader = new Reader(&source_, &report_, true/*checksum*/,
-                                       initial_offset);
-
-    // Read all records from expected_record_offset through the last one.
-    ASSERT_LT(expected_record_offset, num_initial_offset_records_);
-    for (; expected_record_offset < num_initial_offset_records_;
-         ++expected_record_offset) {
-      Slice record;
-      std::string scratch;
-      ASSERT_TRUE(offset_reader->ReadRecord(&record, &scratch));
-      ASSERT_EQ(initial_offset_record_sizes_[expected_record_offset],
-                record.size());
-      ASSERT_EQ(initial_offset_last_record_offsets_[expected_record_offset],
-                offset_reader->LastRecordOffset());
-      ASSERT_EQ((char)('a' + expected_record_offset), record.data()[0]);
-    }
-    delete offset_reader;
-  }
 };
 
-size_t LogTest::initial_offset_record_sizes_[] =
-    {10000,  // Two sizable records in first block
-     10000,
-     2 * log::kBlockSize - 1000,  // Span three blocks
-     1,
-     13716,  // Consume all but two bytes of block 3.
-     log::kBlockSize - kHeaderSize, // Consume the entirety of block 4.
-    };
+TEST_P(LogTest, Empty) { ASSERT_EQ("EOF", Read()); }
 
-uint64_t LogTest::initial_offset_last_record_offsets_[] =
-    {0,
-     kHeaderSize + 10000,
-     2 * (kHeaderSize + 10000),
-     2 * (kHeaderSize + 10000) +
-         (2 * log::kBlockSize - 1000) + 3 * kHeaderSize,
-     2 * (kHeaderSize + 10000) +
-         (2 * log::kBlockSize - 1000) + 3 * kHeaderSize
-         + kHeaderSize + 1,
-     3 * log::kBlockSize,
-    };
-
-// LogTest::initial_offset_last_record_offsets_ must be defined before this.
-int LogTest::num_initial_offset_records_ =
-    sizeof(LogTest::initial_offset_last_record_offsets_)/sizeof(uint64_t);
-
-TEST(LogTest, Empty) {
-  ASSERT_EQ("EOF", Read());
-}
-
-TEST(LogTest, ReadWrite) {
+TEST_P(LogTest, ReadWrite) {
   Write("foo");
   Write("bar");
   Write("");
@@ -284,7 +265,7 @@ TEST(LogTest, ReadWrite) {
   ASSERT_EQ("EOF", Read());  // Make sure reads at eof work
 }
 
-TEST(LogTest, ManyBlocks) {
+TEST_P(LogTest, ManyBlocks) {
   for (int i = 0; i < 100000; i++) {
     Write(NumberString(i));
   }
@@ -294,7 +275,7 @@ TEST(LogTest, ManyBlocks) {
   ASSERT_EQ("EOF", Read());
 }
 
-TEST(LogTest, Fragmentation) {
+TEST_P(LogTest, Fragmentation) {
   Write("small");
   Write(BigString("medium", 50000));
   Write(BigString("large", 100000));
@@ -304,11 +285,13 @@ TEST(LogTest, Fragmentation) {
   ASSERT_EQ("EOF", Read());
 }
 
-TEST(LogTest, MarginalTrailer) {
+TEST_P(LogTest, MarginalTrailer) {
   // Make a trailer that is exactly the same length as an empty record.
-  const int n = kBlockSize - 2*kHeaderSize;
+  int header_size =
+      std::get<0>(GetParam()) ? kRecyclableHeaderSize : kHeaderSize;
+  const int n = kBlockSize - 2 * header_size;
   Write(BigString("foo", n));
-  ASSERT_EQ(kBlockSize - kHeaderSize, WrittenBytes());
+  ASSERT_EQ((unsigned int)(kBlockSize - header_size), WrittenBytes());
   Write("");
   Write("bar");
   ASSERT_EQ(BigString("foo", n), Read());
@@ -317,23 +300,27 @@ TEST(LogTest, MarginalTrailer) {
   ASSERT_EQ("EOF", Read());
 }
 
-TEST(LogTest, MarginalTrailer2) {
+TEST_P(LogTest, MarginalTrailer2) {
   // Make a trailer that is exactly the same length as an empty record.
-  const int n = kBlockSize - 2*kHeaderSize;
+  int header_size =
+      std::get<0>(GetParam()) ? kRecyclableHeaderSize : kHeaderSize;
+  const int n = kBlockSize - 2 * header_size;
   Write(BigString("foo", n));
-  ASSERT_EQ(kBlockSize - kHeaderSize, WrittenBytes());
+  ASSERT_EQ((unsigned int)(kBlockSize - header_size), WrittenBytes());
   Write("bar");
   ASSERT_EQ(BigString("foo", n), Read());
   ASSERT_EQ("bar", Read());
   ASSERT_EQ("EOF", Read());
-  ASSERT_EQ(0, DroppedBytes());
+  ASSERT_EQ(0U, DroppedBytes());
   ASSERT_EQ("", ReportMessage());
 }
 
-TEST(LogTest, ShortTrailer) {
-  const int n = kBlockSize - 2*kHeaderSize + 4;
+TEST_P(LogTest, ShortTrailer) {
+  int header_size =
+      std::get<0>(GetParam()) ? kRecyclableHeaderSize : kHeaderSize;
+  const int n = kBlockSize - 2 * header_size + 4;
   Write(BigString("foo", n));
-  ASSERT_EQ(kBlockSize - kHeaderSize + 4, WrittenBytes());
+  ASSERT_EQ((unsigned int)(kBlockSize - header_size + 4), WrittenBytes());
   Write("");
   Write("bar");
   ASSERT_EQ(BigString("foo", n), Read());
@@ -342,24 +329,17 @@ TEST(LogTest, ShortTrailer) {
   ASSERT_EQ("EOF", Read());
 }
 
-TEST(LogTest, AlignedEof) {
-  const int n = kBlockSize - 2*kHeaderSize + 4;
+TEST_P(LogTest, AlignedEof) {
+  int header_size =
+      std::get<0>(GetParam()) ? kRecyclableHeaderSize : kHeaderSize;
+  const int n = kBlockSize - 2 * header_size + 4;
   Write(BigString("foo", n));
-  ASSERT_EQ(kBlockSize - kHeaderSize + 4, WrittenBytes());
+  ASSERT_EQ((unsigned int)(kBlockSize - header_size + 4), WrittenBytes());
   ASSERT_EQ(BigString("foo", n), Read());
   ASSERT_EQ("EOF", Read());
 }
 
-TEST(LogTest, OpenForAppend) {
-  Write("hello");
-  ReopenForAppend();
-  Write("world");
-  ASSERT_EQ("hello", Read());
-  ASSERT_EQ("world", Read());
-  ASSERT_EQ("EOF", Read());
-}
-
-TEST(LogTest, RandomRead) {
+TEST_P(LogTest, RandomRead) {
   const int N = 500;
   Random write_rnd(301);
   for (int i = 0; i < N; i++) {
@@ -374,135 +354,207 @@ TEST(LogTest, RandomRead) {
 
 // Tests of all the error paths in log_reader.cc follow:
 
-TEST(LogTest, ReadError) {
+TEST_P(LogTest, ReadError) {
   Write("foo");
   ForceError();
   ASSERT_EQ("EOF", Read());
-  ASSERT_EQ(kBlockSize, DroppedBytes());
+  ASSERT_EQ((unsigned int)kBlockSize, DroppedBytes());
   ASSERT_EQ("OK", MatchError("read error"));
 }
 
-TEST(LogTest, BadRecordType) {
+TEST_P(LogTest, BadRecordType) {
   Write("foo");
   // Type is stored in header[6]
   IncrementByte(6, 100);
-  FixChecksum(0, 3);
+  FixChecksum(0, 3, false);
   ASSERT_EQ("EOF", Read());
-  ASSERT_EQ(3, DroppedBytes());
+  ASSERT_EQ(3U, DroppedBytes());
   ASSERT_EQ("OK", MatchError("unknown record type"));
 }
 
-TEST(LogTest, TruncatedTrailingRecordIsIgnored) {
+TEST_P(LogTest, TruncatedTrailingRecordIsIgnored) {
   Write("foo");
   ShrinkSize(4);   // Drop all payload as well as a header byte
   ASSERT_EQ("EOF", Read());
-  // Truncated last record is ignored, not treated as an error.
-  ASSERT_EQ(0, DroppedBytes());
+  // Truncated last record is ignored, not treated as an error
+  ASSERT_EQ(0U, DroppedBytes());
   ASSERT_EQ("", ReportMessage());
 }
 
-TEST(LogTest, BadLength) {
-  const int kPayloadSize = kBlockSize - kHeaderSize;
+TEST_P(LogTest, TruncatedTrailingRecordIsNotIgnored) {
+  if (allow_retry_read_) {
+    // If read retry is allowed, then truncated trailing record should not
+    // raise an error.
+    return;
+  }
+  Write("foo");
+  ShrinkSize(4);  // Drop all payload as well as a header byte
+  ASSERT_EQ("EOF", Read(WALRecoveryMode::kAbsoluteConsistency));
+  // Truncated last record is ignored, not treated as an error
+  ASSERT_GT(DroppedBytes(), 0U);
+  ASSERT_EQ("OK", MatchError("Corruption: truncated header"));
+}
+
+TEST_P(LogTest, BadLength) {
+  if (allow_retry_read_) {
+    // If read retry is allowed, then we should not raise an error when the
+    // record length specified in header is longer than data currently
+    // available. It's possible that the body of the record is not written yet.
+    return;
+  }
+  bool recyclable_log = (std::get<0>(GetParam()) != 0);
+  int header_size = recyclable_log ? kRecyclableHeaderSize : kHeaderSize;
+  const int kPayloadSize = kBlockSize - header_size;
   Write(BigString("bar", kPayloadSize));
   Write("foo");
   // Least significant size byte is stored in header[4].
   IncrementByte(4, 1);
-  ASSERT_EQ("foo", Read());
-  ASSERT_EQ(kBlockSize, DroppedBytes());
-  ASSERT_EQ("OK", MatchError("bad record length"));
+  if (!recyclable_log) {
+    ASSERT_EQ("foo", Read());
+    ASSERT_EQ(kBlockSize, DroppedBytes());
+    ASSERT_EQ("OK", MatchError("bad record length"));
+  } else {
+    ASSERT_EQ("EOF", Read());
+  }
 }
 
-TEST(LogTest, BadLengthAtEndIsIgnored) {
+TEST_P(LogTest, BadLengthAtEndIsIgnored) {
+  if (allow_retry_read_) {
+    // If read retry is allowed, then we should not raise an error when the
+    // record length specified in header is longer than data currently
+    // available. It's possible that the body of the record is not written yet.
+    return;
+  }
   Write("foo");
   ShrinkSize(1);
   ASSERT_EQ("EOF", Read());
-  ASSERT_EQ(0, DroppedBytes());
+  ASSERT_EQ(0U, DroppedBytes());
   ASSERT_EQ("", ReportMessage());
 }
 
-TEST(LogTest, ChecksumMismatch) {
+TEST_P(LogTest, BadLengthAtEndIsNotIgnored) {
+  if (allow_retry_read_) {
+    // If read retry is allowed, then we should not raise an error when the
+    // record length specified in header is longer than data currently
+    // available. It's possible that the body of the record is not written yet.
+    return;
+  }
   Write("foo");
-  IncrementByte(0, 10);
-  ASSERT_EQ("EOF", Read());
-  ASSERT_EQ(10, DroppedBytes());
-  ASSERT_EQ("OK", MatchError("checksum mismatch"));
+  ShrinkSize(1);
+  ASSERT_EQ("EOF", Read(WALRecoveryMode::kAbsoluteConsistency));
+  ASSERT_GT(DroppedBytes(), 0U);
+  ASSERT_EQ("OK", MatchError("Corruption: truncated record body"));
 }
 
-TEST(LogTest, UnexpectedMiddleType) {
-  Write("foo");
-  SetByte(6, kMiddleType);
-  FixChecksum(0, 3);
+TEST_P(LogTest, ChecksumMismatch) {
+  Write("foooooo");
+  IncrementByte(0, 14);
   ASSERT_EQ("EOF", Read());
-  ASSERT_EQ(3, DroppedBytes());
+  bool recyclable_log = (std::get<0>(GetParam()) != 0);
+  if (!recyclable_log) {
+    ASSERT_EQ(14U, DroppedBytes());
+    ASSERT_EQ("OK", MatchError("checksum mismatch"));
+  } else {
+    ASSERT_EQ(0U, DroppedBytes());
+    ASSERT_EQ("", ReportMessage());
+  }
+}
+
+TEST_P(LogTest, UnexpectedMiddleType) {
+  Write("foo");
+  bool recyclable_log = (std::get<0>(GetParam()) != 0);
+  SetByte(6, static_cast<char>(recyclable_log ? kRecyclableMiddleType
+                                              : kMiddleType));
+  FixChecksum(0, 3, !!recyclable_log);
+  ASSERT_EQ("EOF", Read());
+  ASSERT_EQ(3U, DroppedBytes());
   ASSERT_EQ("OK", MatchError("missing start"));
 }
 
-TEST(LogTest, UnexpectedLastType) {
+TEST_P(LogTest, UnexpectedLastType) {
   Write("foo");
-  SetByte(6, kLastType);
-  FixChecksum(0, 3);
+  bool recyclable_log = (std::get<0>(GetParam()) != 0);
+  SetByte(6,
+          static_cast<char>(recyclable_log ? kRecyclableLastType : kLastType));
+  FixChecksum(0, 3, !!recyclable_log);
   ASSERT_EQ("EOF", Read());
-  ASSERT_EQ(3, DroppedBytes());
+  ASSERT_EQ(3U, DroppedBytes());
   ASSERT_EQ("OK", MatchError("missing start"));
 }
 
-TEST(LogTest, UnexpectedFullType) {
+TEST_P(LogTest, UnexpectedFullType) {
   Write("foo");
   Write("bar");
-  SetByte(6, kFirstType);
-  FixChecksum(0, 3);
+  bool recyclable_log = (std::get<0>(GetParam()) != 0);
+  SetByte(
+      6, static_cast<char>(recyclable_log ? kRecyclableFirstType : kFirstType));
+  FixChecksum(0, 3, !!recyclable_log);
   ASSERT_EQ("bar", Read());
   ASSERT_EQ("EOF", Read());
-  ASSERT_EQ(3, DroppedBytes());
+  ASSERT_EQ(3U, DroppedBytes());
   ASSERT_EQ("OK", MatchError("partial record without end"));
 }
 
-TEST(LogTest, UnexpectedFirstType) {
+TEST_P(LogTest, UnexpectedFirstType) {
   Write("foo");
   Write(BigString("bar", 100000));
-  SetByte(6, kFirstType);
-  FixChecksum(0, 3);
+  bool recyclable_log = (std::get<0>(GetParam()) != 0);
+  SetByte(
+      6, static_cast<char>(recyclable_log ? kRecyclableFirstType : kFirstType));
+  FixChecksum(0, 3, !!recyclable_log);
   ASSERT_EQ(BigString("bar", 100000), Read());
   ASSERT_EQ("EOF", Read());
-  ASSERT_EQ(3, DroppedBytes());
+  ASSERT_EQ(3U, DroppedBytes());
   ASSERT_EQ("OK", MatchError("partial record without end"));
 }
 
-TEST(LogTest, MissingLastIsIgnored) {
+TEST_P(LogTest, MissingLastIsIgnored) {
   Write(BigString("bar", kBlockSize));
   // Remove the LAST block, including header.
   ShrinkSize(14);
   ASSERT_EQ("EOF", Read());
   ASSERT_EQ("", ReportMessage());
-  ASSERT_EQ(0, DroppedBytes());
+  ASSERT_EQ(0U, DroppedBytes());
 }
 
-TEST(LogTest, PartialLastIsIgnored) {
+TEST_P(LogTest, MissingLastIsNotIgnored) {
+  if (allow_retry_read_) {
+    // If read retry is allowed, then truncated trailing record should not
+    // raise an error.
+    return;
+  }
+  Write(BigString("bar", kBlockSize));
+  // Remove the LAST block, including header.
+  ShrinkSize(14);
+  ASSERT_EQ("EOF", Read(WALRecoveryMode::kAbsoluteConsistency));
+  ASSERT_GT(DroppedBytes(), 0U);
+  ASSERT_EQ("OK", MatchError("Corruption: error reading trailing data"));
+}
+
+TEST_P(LogTest, PartialLastIsIgnored) {
   Write(BigString("bar", kBlockSize));
   // Cause a bad record length in the LAST block.
   ShrinkSize(1);
   ASSERT_EQ("EOF", Read());
   ASSERT_EQ("", ReportMessage());
-  ASSERT_EQ(0, DroppedBytes());
+  ASSERT_EQ(0U, DroppedBytes());
 }
 
-TEST(LogTest, SkipIntoMultiRecord) {
-  // Consider a fragmented record:
-  //    first(R1), middle(R1), last(R1), first(R2)
-  // If initial_offset points to a record after first(R1) but before first(R2)
-  // incomplete fragment errors are not actual errors, and must be suppressed
-  // until a new first or full record is encountered.
-  Write(BigString("foo", 3*kBlockSize));
-  Write("correct");
-  StartReadingAt(kBlockSize);
-
-  ASSERT_EQ("correct", Read());
-  ASSERT_EQ("", ReportMessage());
-  ASSERT_EQ(0, DroppedBytes());
-  ASSERT_EQ("EOF", Read());
+TEST_P(LogTest, PartialLastIsNotIgnored) {
+  if (allow_retry_read_) {
+    // If read retry is allowed, then truncated trailing record should not
+    // raise an error.
+    return;
+  }
+  Write(BigString("bar", kBlockSize));
+  // Cause a bad record length in the LAST block.
+  ShrinkSize(1);
+  ASSERT_EQ("EOF", Read(WALRecoveryMode::kAbsoluteConsistency));
+  ASSERT_GT(DroppedBytes(), 0U);
+  ASSERT_EQ("OK", MatchError("Corruption: truncated record body"));
 }
 
-TEST(LogTest, ErrorJoinsRecords) {
+TEST_P(LogTest, ErrorJoinsRecords) {
   // Consider two fragmented records:
   //    first(R1) last(R1) first(R2) last(R2)
   // where the middle two fragments disappear.  We do not want
@@ -514,78 +566,336 @@ TEST(LogTest, ErrorJoinsRecords) {
   Write("correct");
 
   // Wipe the middle block
-  for (int offset = kBlockSize; offset < 2*kBlockSize; offset++) {
+  for (unsigned int offset = kBlockSize; offset < 2*kBlockSize; offset++) {
     SetByte(offset, 'x');
   }
 
-  ASSERT_EQ("correct", Read());
+  bool recyclable_log = (std::get<0>(GetParam()) != 0);
+  if (!recyclable_log) {
+    ASSERT_EQ("correct", Read());
+    ASSERT_EQ("EOF", Read());
+    size_t dropped = DroppedBytes();
+    ASSERT_LE(dropped, 2 * kBlockSize + 100);
+    ASSERT_GE(dropped, 2 * kBlockSize);
+  } else {
+    ASSERT_EQ("EOF", Read());
+  }
+}
+
+TEST_P(LogTest, ClearEofSingleBlock) {
+  Write("foo");
+  Write("bar");
+  bool recyclable_log = (std::get<0>(GetParam()) != 0);
+  int header_size = recyclable_log ? kRecyclableHeaderSize : kHeaderSize;
+  ForceEOF(3 + header_size + 2);
+  ASSERT_EQ("foo", Read());
+  UnmarkEOF();
+  ASSERT_EQ("bar", Read());
+  ASSERT_TRUE(IsEOF());
   ASSERT_EQ("EOF", Read());
-  const size_t dropped = DroppedBytes();
-  ASSERT_LE(dropped, 2*kBlockSize + 100);
-  ASSERT_GE(dropped, 2*kBlockSize);
+  Write("xxx");
+  UnmarkEOF();
+  ASSERT_EQ("xxx", Read());
+  ASSERT_TRUE(IsEOF());
 }
 
-TEST(LogTest, ReadStart) {
-  CheckInitialOffsetRecord(0, 0);
+TEST_P(LogTest, ClearEofMultiBlock) {
+  size_t num_full_blocks = 5;
+  bool recyclable_log = (std::get<0>(GetParam()) != 0);
+  int header_size = recyclable_log ? kRecyclableHeaderSize : kHeaderSize;
+  size_t n = (kBlockSize - header_size) * num_full_blocks + 25;
+  Write(BigString("foo", n));
+  Write(BigString("bar", n));
+  ForceEOF(n + num_full_blocks * header_size + header_size + 3);
+  ASSERT_EQ(BigString("foo", n), Read());
+  ASSERT_TRUE(IsEOF());
+  UnmarkEOF();
+  ASSERT_EQ(BigString("bar", n), Read());
+  ASSERT_TRUE(IsEOF());
+  Write(BigString("xxx", n));
+  UnmarkEOF();
+  ASSERT_EQ(BigString("xxx", n), Read());
+  ASSERT_TRUE(IsEOF());
 }
 
-TEST(LogTest, ReadSecondOneOff) {
-  CheckInitialOffsetRecord(1, 1);
+TEST_P(LogTest, ClearEofError) {
+  // If an error occurs during Read() in UnmarkEOF(), the records contained
+  // in the buffer should be returned on subsequent calls of ReadRecord()
+  // until no more full records are left, whereafter ReadRecord() should return
+  // false to indicate that it cannot read any further.
+
+  Write("foo");
+  Write("bar");
+  UnmarkEOF();
+  ASSERT_EQ("foo", Read());
+  ASSERT_TRUE(IsEOF());
+  Write("xxx");
+  ForceError(0);
+  UnmarkEOF();
+  ASSERT_EQ("bar", Read());
+  ASSERT_EQ("EOF", Read());
 }
 
-TEST(LogTest, ReadSecondTenThousand) {
-  CheckInitialOffsetRecord(10000, 1);
+TEST_P(LogTest, ClearEofError2) {
+  Write("foo");
+  Write("bar");
+  UnmarkEOF();
+  ASSERT_EQ("foo", Read());
+  Write("xxx");
+  ForceError(3);
+  UnmarkEOF();
+  ASSERT_EQ("bar", Read());
+  ASSERT_EQ("EOF", Read());
+  ASSERT_EQ(3U, DroppedBytes());
+  ASSERT_EQ("OK", MatchError("read error"));
 }
 
-TEST(LogTest, ReadSecondStart) {
-  CheckInitialOffsetRecord(10007, 1);
+TEST_P(LogTest, Recycle) {
+  bool recyclable_log = (std::get<0>(GetParam()) != 0);
+  if (!recyclable_log) {
+    return;  // test is only valid for recycled logs
+  }
+  Write("foo");
+  Write("bar");
+  Write("baz");
+  Write("bif");
+  Write("blitz");
+  while (get_reader_contents()->size() < log::kBlockSize * 2) {
+    Write("xxxxxxxxxxxxxxxx");
+  }
+  std::unique_ptr<FSWritableFile> sink(
+      new test::OverwritingStringSink(get_reader_contents()));
+  std::unique_ptr<WritableFileWriter> dest_holder(new WritableFileWriter(
+      std::move(sink), "" /* don't care */, FileOptions()));
+  Writer recycle_writer(std::move(dest_holder), 123, true);
+  ASSERT_OK(recycle_writer.AddRecord(Slice("foooo")));
+  ASSERT_OK(recycle_writer.AddRecord(Slice("bar")));
+  ASSERT_GE(get_reader_contents()->size(), log::kBlockSize * 2);
+  ASSERT_EQ("foooo", Read());
+  ASSERT_EQ("bar", Read());
+  ASSERT_EQ("EOF", Read());
 }
 
-TEST(LogTest, ReadThirdOneOff) {
-  CheckInitialOffsetRecord(10008, 2);
+INSTANTIATE_TEST_CASE_P(bool, LogTest,
+                        ::testing::Values(std::make_tuple(0, false),
+                                          std::make_tuple(0, true),
+                                          std::make_tuple(1, false),
+                                          std::make_tuple(1, true)));
+
+class RetriableLogTest : public ::testing::TestWithParam<int> {
+ private:
+  class ReportCollector : public Reader::Reporter {
+   public:
+    size_t dropped_bytes_;
+    std::string message_;
+
+    ReportCollector() : dropped_bytes_(0) {}
+    void Corruption(size_t bytes, const Status& status) override {
+      dropped_bytes_ += bytes;
+      message_.append(status.ToString());
+    }
+  };
+
+  Slice contents_;
+  test::StringSink* sink_;
+  std::unique_ptr<Writer> log_writer_;
+  Env* env_;
+  const std::string test_dir_;
+  const std::string log_file_;
+  std::unique_ptr<WritableFileWriter> writer_;
+  std::unique_ptr<SequentialFileReader> reader_;
+  ReportCollector report_;
+  std::unique_ptr<FragmentBufferedReader> log_reader_;
+
+ public:
+  RetriableLogTest()
+      : contents_(),
+        sink_(new test::StringSink(&contents_)),
+        log_writer_(nullptr),
+        env_(Env::Default()),
+        test_dir_(test::PerThreadDBPath("retriable_log_test")),
+        log_file_(test_dir_ + "/log"),
+        writer_(nullptr),
+        reader_(nullptr),
+        log_reader_(nullptr) {
+    std::unique_ptr<FSWritableFile> sink_holder(sink_);
+    std::unique_ptr<WritableFileWriter> wfw(new WritableFileWriter(
+        std::move(sink_holder), "" /* file name */, FileOptions()));
+    log_writer_.reset(new Writer(std::move(wfw), 123, GetParam()));
+  }
+
+  Status SetupTestEnv() {
+    Status s;
+    FileOptions fopts;
+    auto fs = env_->GetFileSystem();
+    s = fs->CreateDirIfMissing(test_dir_, IOOptions(), nullptr);
+    std::unique_ptr<FSWritableFile> writable_file;
+    if (s.ok()) {
+      s = fs->NewWritableFile(log_file_, fopts, &writable_file, nullptr);
+    }
+    if (s.ok()) {
+      writer_.reset(
+          new WritableFileWriter(std::move(writable_file), log_file_, fopts));
+      EXPECT_NE(writer_, nullptr);
+    }
+    std::unique_ptr<FSSequentialFile> seq_file;
+    if (s.ok()) {
+      s = fs->NewSequentialFile(log_file_, fopts, &seq_file, nullptr);
+    }
+    if (s.ok()) {
+      reader_.reset(new SequentialFileReader(std::move(seq_file), log_file_));
+      EXPECT_NE(reader_, nullptr);
+      log_reader_.reset(new FragmentBufferedReader(
+          nullptr, std::move(reader_), &report_, true /* checksum */,
+          123 /* log_number */));
+      EXPECT_NE(log_reader_, nullptr);
+    }
+    return s;
+  }
+
+  std::string contents() { return sink_->contents_; }
+
+  void Encode(const std::string& msg) {
+    ASSERT_OK(log_writer_->AddRecord(Slice(msg)));
+  }
+
+  void Write(const Slice& data) {
+    ASSERT_OK(writer_->Append(data));
+    ASSERT_OK(writer_->Sync(true));
+  }
+
+  bool TryRead(std::string* result) {
+    assert(result != nullptr);
+    result->clear();
+    std::string scratch;
+    Slice record;
+    bool r = log_reader_->ReadRecord(&record, &scratch);
+    if (r) {
+      result->assign(record.data(), record.size());
+      return true;
+    } else {
+      return false;
+    }
+  }
+};
+
+TEST_P(RetriableLogTest, TailLog_PartialHeader) {
+  ASSERT_OK(SetupTestEnv());
+  std::vector<int> remaining_bytes_in_last_record;
+  size_t header_size = GetParam() ? kRecyclableHeaderSize : kHeaderSize;
+  bool eof = false;
+  SyncPoint::GetInstance()->DisableProcessing();
+  SyncPoint::GetInstance()->LoadDependency(
+      {{"RetriableLogTest::TailLog:AfterPart1",
+        "RetriableLogTest::TailLog:BeforeReadRecord"},
+       {"FragmentBufferedLogReader::TryReadMore:FirstEOF",
+        "RetriableLogTest::TailLog:BeforePart2"}});
+  SyncPoint::GetInstance()->ClearAllCallBacks();
+  SyncPoint::GetInstance()->SetCallBack(
+      "FragmentBufferedLogReader::TryReadMore:FirstEOF",
+      [&](void* /*arg*/) { eof = true; });
+  SyncPoint::GetInstance()->EnableProcessing();
+
+  size_t delta = header_size - 1;
+  port::Thread log_writer_thread([&]() {
+    size_t old_sz = contents().size();
+    Encode("foo");
+    size_t new_sz = contents().size();
+    std::string part1 = contents().substr(old_sz, delta);
+    std::string part2 =
+        contents().substr(old_sz + delta, new_sz - old_sz - delta);
+    Write(Slice(part1));
+    TEST_SYNC_POINT("RetriableLogTest::TailLog:AfterPart1");
+    TEST_SYNC_POINT("RetriableLogTest::TailLog:BeforePart2");
+    Write(Slice(part2));
+  });
+
+  std::string record;
+  port::Thread log_reader_thread([&]() {
+    TEST_SYNC_POINT("RetriableLogTest::TailLog:BeforeReadRecord");
+    while (!TryRead(&record)) {
+    }
+  });
+  log_reader_thread.join();
+  log_writer_thread.join();
+  ASSERT_EQ("foo", record);
+  ASSERT_TRUE(eof);
 }
 
-TEST(LogTest, ReadThirdStart) {
-  CheckInitialOffsetRecord(20014, 2);
+TEST_P(RetriableLogTest, TailLog_FullHeader) {
+  ASSERT_OK(SetupTestEnv());
+  std::vector<int> remaining_bytes_in_last_record;
+  size_t header_size = GetParam() ? kRecyclableHeaderSize : kHeaderSize;
+  bool eof = false;
+  SyncPoint::GetInstance()->DisableProcessing();
+  SyncPoint::GetInstance()->LoadDependency(
+      {{"RetriableLogTest::TailLog:AfterPart1",
+        "RetriableLogTest::TailLog:BeforeReadRecord"},
+       {"FragmentBufferedLogReader::TryReadMore:FirstEOF",
+        "RetriableLogTest::TailLog:BeforePart2"}});
+  SyncPoint::GetInstance()->ClearAllCallBacks();
+  SyncPoint::GetInstance()->SetCallBack(
+      "FragmentBufferedLogReader::TryReadMore:FirstEOF",
+      [&](void* /*arg*/) { eof = true; });
+  SyncPoint::GetInstance()->EnableProcessing();
+
+  size_t delta = header_size + 1;
+  port::Thread log_writer_thread([&]() {
+    size_t old_sz = contents().size();
+    Encode("foo");
+    size_t new_sz = contents().size();
+    std::string part1 = contents().substr(old_sz, delta);
+    std::string part2 =
+        contents().substr(old_sz + delta, new_sz - old_sz - delta);
+    Write(Slice(part1));
+    TEST_SYNC_POINT("RetriableLogTest::TailLog:AfterPart1");
+    TEST_SYNC_POINT("RetriableLogTest::TailLog:BeforePart2");
+    Write(Slice(part2));
+    ASSERT_TRUE(eof);
+  });
+
+  std::string record;
+  port::Thread log_reader_thread([&]() {
+    TEST_SYNC_POINT("RetriableLogTest::TailLog:BeforeReadRecord");
+    while (!TryRead(&record)) {
+    }
+  });
+  log_reader_thread.join();
+  log_writer_thread.join();
+  ASSERT_EQ("foo", record);
 }
 
-TEST(LogTest, ReadFourthOneOff) {
-  CheckInitialOffsetRecord(20015, 3);
+TEST_P(RetriableLogTest, NonBlockingReadFullRecord) {
+  // Clear all sync point callbacks even if this test does not use sync point.
+  // It is necessary, otherwise the execute of this test may hit a sync point
+  // with which a callback is registered. The registered callback may access
+  // some dead variable, causing segfault.
+  SyncPoint::GetInstance()->DisableProcessing();
+  SyncPoint::GetInstance()->ClearAllCallBacks();
+  ASSERT_OK(SetupTestEnv());
+  size_t header_size = GetParam() ? kRecyclableHeaderSize : kHeaderSize;
+  size_t delta = header_size - 1;
+  size_t old_sz = contents().size();
+  Encode("foo-bar");
+  size_t new_sz = contents().size();
+  std::string part1 = contents().substr(old_sz, delta);
+  std::string part2 =
+      contents().substr(old_sz + delta, new_sz - old_sz - delta);
+  Write(Slice(part1));
+  std::string record;
+  ASSERT_FALSE(TryRead(&record));
+  ASSERT_TRUE(record.empty());
+  Write(Slice(part2));
+  ASSERT_TRUE(TryRead(&record));
+  ASSERT_EQ("foo-bar", record);
 }
 
-TEST(LogTest, ReadFourthFirstBlockTrailer) {
-  CheckInitialOffsetRecord(log::kBlockSize - 4, 3);
-}
-
-TEST(LogTest, ReadFourthMiddleBlock) {
-  CheckInitialOffsetRecord(log::kBlockSize + 1, 3);
-}
-
-TEST(LogTest, ReadFourthLastBlock) {
-  CheckInitialOffsetRecord(2 * log::kBlockSize + 1, 3);
-}
-
-TEST(LogTest, ReadFourthStart) {
-  CheckInitialOffsetRecord(
-      2 * (kHeaderSize + 1000) + (2 * log::kBlockSize - 1000) + 3 * kHeaderSize,
-      3);
-}
-
-TEST(LogTest, ReadInitialOffsetIntoBlockPadding) {
-  CheckInitialOffsetRecord(3 * log::kBlockSize - 3, 5);
-}
-
-TEST(LogTest, ReadEnd) {
-  CheckOffsetPastEndReturnsNoRecords(0);
-}
-
-TEST(LogTest, ReadPastEnd) {
-  CheckOffsetPastEndReturnsNoRecords(5);
-}
+INSTANTIATE_TEST_CASE_P(bool, RetriableLogTest, ::testing::Values(0, 2));
 
 }  // namespace log
-}  // namespace leveldb
+}  // namespace ROCKSDB_NAMESPACE
 
 int main(int argc, char** argv) {
-  return leveldb::test::RunAllTests();
+  ::testing::InitGoogleTest(&argc, argv);
+  return RUN_ALL_TESTS();
 }

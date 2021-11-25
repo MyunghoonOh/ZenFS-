@@ -1,15 +1,32 @@
+//  Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
+//  This source code is licensed under both the GPLv2 (found in the
+//  COPYING file in the root directory) and Apache 2.0 License
+//  (found in the LICENSE.Apache file in the root directory).
+//
 // Copyright (c) 2011 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
-#include <vector>
-
 #include "util/coding.h"
-#include "util/testharness.h"
 
-namespace leveldb {
+#include "test_util/testharness.h"
+
+namespace ROCKSDB_NAMESPACE {
 
 class Coding { };
+TEST(Coding, Fixed16) {
+  std::string s;
+  for (uint16_t v = 0; v < 0xFFFF; v++) {
+    PutFixed16(&s, v);
+  }
+
+  const char* p = s.data();
+  for (uint16_t v = 0; v < 0xFFFF; v++) {
+    uint16_t actual = DecodeFixed16(p);
+    ASSERT_EQ(v, actual);
+    p += sizeof(uint16_t);
+  }
+}
 
 TEST(Coding, Fixed32) {
   std::string s;
@@ -37,7 +54,7 @@ TEST(Coding, Fixed64) {
   const char* p = s.data();
   for (int power = 0; power <= 63; power++) {
     uint64_t v = static_cast<uint64_t>(1) << power;
-    uint64_t actual;
+    uint64_t actual = 0;
     actual = DecodeFixed64(p);
     ASSERT_EQ(v-1, actual);
     p += sizeof(uint64_t);
@@ -56,7 +73,7 @@ TEST(Coding, Fixed64) {
 TEST(Coding, EncodingOutput) {
   std::string dst;
   PutFixed32(&dst, 0x04030201);
-  ASSERT_EQ(4, dst.size());
+  ASSERT_EQ(4U, dst.size());
   ASSERT_EQ(0x01, static_cast<int>(dst[0]));
   ASSERT_EQ(0x02, static_cast<int>(dst[1]));
   ASSERT_EQ(0x03, static_cast<int>(dst[2]));
@@ -64,7 +81,7 @@ TEST(Coding, EncodingOutput) {
 
   dst.clear();
   PutFixed64(&dst, 0x0807060504030201ull);
-  ASSERT_EQ(8, dst.size());
+  ASSERT_EQ(8U, dst.size());
   ASSERT_EQ(0x01, static_cast<int>(dst[0]));
   ASSERT_EQ(0x02, static_cast<int>(dst[1]));
   ASSERT_EQ(0x03, static_cast<int>(dst[2]));
@@ -86,7 +103,7 @@ TEST(Coding, Varint32) {
   const char* limit = p + s.size();
   for (uint32_t i = 0; i < (32 * 32); i++) {
     uint32_t expected = (i / 32) << (i % 32);
-    uint32_t actual;
+    uint32_t actual = 0;
     const char* start = p;
     p = GetVarint32Ptr(p, limit, &actual);
     ASSERT_TRUE(p != nullptr);
@@ -110,18 +127,18 @@ TEST(Coding, Varint64) {
     values.push_back(power);
     values.push_back(power-1);
     values.push_back(power+1);
-  }
+  };
 
   std::string s;
-  for (size_t i = 0; i < values.size(); i++) {
+  for (unsigned int i = 0; i < values.size(); i++) {
     PutVarint64(&s, values[i]);
   }
 
   const char* p = s.data();
   const char* limit = p + s.size();
-  for (size_t i = 0; i < values.size(); i++) {
+  for (unsigned int i = 0; i < values.size(); i++) {
     ASSERT_TRUE(p < limit);
-    uint64_t actual;
+    uint64_t actual = 0;
     const char* start = p;
     p = GetVarint64Ptr(p, limit, &actual);
     ASSERT_TRUE(p != nullptr);
@@ -129,6 +146,7 @@ TEST(Coding, Varint64) {
     ASSERT_EQ(VarintLength(actual), p - start);
   }
   ASSERT_EQ(p, limit);
+
 }
 
 TEST(Coding, Varint32Overflow) {
@@ -143,7 +161,7 @@ TEST(Coding, Varint32Truncation) {
   std::string s;
   PutVarint32(&s, large_value);
   uint32_t result;
-  for (size_t len = 0; len < s.size() - 1; len++) {
+  for (unsigned int len = 0; len + 1 < s.size(); len++) {
     ASSERT_TRUE(GetVarint32Ptr(s.data(), s.data() + len, &result) == nullptr);
   }
   ASSERT_TRUE(
@@ -163,7 +181,7 @@ TEST(Coding, Varint64Truncation) {
   std::string s;
   PutVarint64(&s, large_value);
   uint64_t result;
-  for (size_t len = 0; len < s.size() - 1; len++) {
+  for (unsigned int len = 0; len + 1 < s.size(); len++) {
     ASSERT_TRUE(GetVarint64Ptr(s.data(), s.data() + len, &result) == nullptr);
   }
   ASSERT_TRUE(
@@ -191,8 +209,9 @@ TEST(Coding, Strings) {
   ASSERT_EQ("", input.ToString());
 }
 
-}  // namespace leveldb
+}  // namespace ROCKSDB_NAMESPACE
 
 int main(int argc, char** argv) {
-  return leveldb::test::RunAllTests();
+  ::testing::InitGoogleTest(&argc, argv);
+  return RUN_ALL_TESTS();
 }
