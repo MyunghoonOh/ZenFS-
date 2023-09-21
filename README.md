@@ -1,6 +1,6 @@
 ## ZenFS+
 
-See Paper here: [https://github.com/facebook/rocksdb/tree/main/examples](https://ieeexplore.ieee.org/document/10070767)
+See Paper here: [https://ieeexplore.ieee.org/document/10070767](https://ieeexplore.ieee.org/document/10070767)
 
 
 
